@@ -1,0 +1,16 @@
+[Unit]
+Description=Mediathek Telegram Download Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/mediathek-bot
+EnvironmentFile=/home/pi/mediathek-bot/.env
+Environment=PATH=/home/pi/mediathek-bot/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/pi/mediathek-bot/venv/bin/python mediathek_bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

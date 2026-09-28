@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""
+Mediathek-Download-Bot für den Raspberry Pi.
+
+Schick dem Bot einen Link (ZDF, ARD, arte, ... alles was yt-dlp kann),
+der Pi lädt das Video in DOWNLOAD_DIR (z.B. einen Syncthing-Ordner)
+und meldet Fortschritt + Fertig im Chat.
+
+Konfiguration über Umgebungsvariablen (siehe .env.example).
+"""
+import asyncio
+import hashlib
+import logging
+import os
+import re
+import time
+from pathlib import Path
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+# ---------------------------------------------------------------- Konfiguration
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+ALLOWED_USERS = {
+    int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").split(",") if x.strip()
+}
+DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", "~/Sync/Mediathek")).expanduser()
+# Temp-Ordner bewusst AUSSERHALB des Sync-Ordners, damit Syncthing keine .part-Dateien überträgt
+TEMP_DIR = Path(os.environ.get("TEMP_DIR", "~/.cache/mediathek-bot")).expanduser()
+MAX_HEIGHT = int(os.environ.get("MAX_HEIGHT", "720"))  # 720p spart Platz am Handy
+SUBTITLES = os.environ.get("SUBTITLES", "0") == "1"
+PROGRESS_INTERVAL = 8  # Sekunden zwischen Fortschritts-Updates
+
+URL_RE = re.compile(r"https?://\S+")
+
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger("mediathek-bot")
+
+download_queue: asyncio.Queue = asyncio.Queue()
+state = {"current": None}  # Titel des laufenden Downloads
+
+
+# ---------------------------------------------------------------- Hilfsfunktionen
+def is_allowed(update: Update) -> bool:
+    user = update.effective_user
+    return user is not None and user.id in ALLOWED_USERS
+
+
+def human_size(num_bytes: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if num_bytes < 1024:
+            return f"{num_bytes:.0f} {unit}"
+        num_bytes /= 1024
+    return f"{num_bytes:.1f} TB"
+
+
+def build_command(url: str) -> list[str]:
+    fmt = f"bv*[height<={MAX_HEIGHT}]+ba/b[height<={MAX_HEIGHT}]/b"
+    cmd = [
+        "yt-dlp",
+        "-f", fmt,
+        "--merge-output-format", "mp4",
+        "-P", f"home:{DOWNLOAD_DIR}",
+        "-P", f"temp:{TEMP_DIR}",
+        "-o", "%(title).120B [%(id)s].%(ext)s",
+        "--retries", "infinite",
+        "--fragment-retries", "infinite",
+        "--no-playlist",
+        "--newline",
+        "--progress",
+        "--no-simulate",
+        "--print", "before_dl:TITLE %(title)s",
+        "--print", "after_move:FILE %(filepath)s",
+        "--progress-template",
+        "download:PROG %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+    ]
+    if SUBTITLES:
+        cmd += ["--write-subs", "--sub-langs", "de.*", "--embed-subs"]
+    cmd.append(url)
+    return cmd
+
+
+async def safe_edit(msg, text: str) -> None:
+    try:
+        await msg.edit_text(text)
+    except BadRequest as e:  # "message is not modified" o.ä. ignorieren
+        if "not modified" not in str(e).lower():
+            log.warning("Edit fehlgeschlagen: %s", e)
+
+
+# ---------------------------------------------------------------- Download
+async def run_download(bot, chat_id: int, url: str) -> None:
+    status = await bot.send_message(chat_id, f"⏳ Starte Download…\n{url}")
+    title, filepath = url, None
+    last_update = 0.0
+    tail: list[str] = []
+
+    proc = await asyncio.create_subprocess_exec(
+        *build_command(url),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    assert proc.stdout is not None
+    async for raw in proc.stdout:
+        line = raw.decode(errors="replace").strip()
+        if not line:
+            continue
+        tail = (tail + [line])[-5:]
+
+        if line.startswith("TITLE "):
+            title = line[6:]
+            state["current"] = title
+            await safe_edit(status, f"⬇️ {title}\nwird geladen…")
+        elif line.startswith("FILE "):
+            filepath = line[5:]
+        elif line.startswith("PROG "):
+            now = time.monotonic()
+            if now - last_update >= PROGRESS_INTERVAL:
+                last_update = now
+                pct, speed, eta = (line[5:].split("|") + ["", "", ""])[:3]
+                await safe_edit(
+                    status,
+                    f"⬇️ {title}\n{pct.strip()} · {speed.strip()} · noch {eta.strip()}",
+                )
+
+    rc = await proc.wait()
+    state["current"] = None
+
+    if rc == 0 and filepath and Path(filepath).exists():
+        size = human_size(Path(filepath).stat().st_size)
+        await safe_edit(status, f"✅ Fertig: {title}\n{size} · wird jetzt aufs Handy synchronisiert")
+    else:
+        err = "\n".join(tail) or "unbekannter Fehler"
+        await safe_edit(status, f"❌ Fehlgeschlagen: {title}\n\n{err[-800:]}")
+
+
+async def worker(app: Application) -> None:
+    """Arbeitet die Warteschlange nacheinander ab (schont den Pi)."""
+    while True:
+        chat_id, url = await download_queue.get()
+        try:
+            await run_download(app.bot, chat_id, url)
+        except Exception as e:  # noqa: BLE001
+            log.exception("Download-Fehler")
+            await app.bot.send_message(chat_id, f"❌ Fehler: {e}")
+        finally:
+            state["current"] = None
+            download_queue.task_done()
+
+
+# ---------------------------------------------------------------- Handler
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_allowed(update):
+        await update.message.reply_text(
+            f"Nicht freigeschaltet. Deine User-ID: {user.id}\n"
+            "Trag sie in ALLOWED_USER_IDS ein und starte den Bot neu."
+        )
+        return
+    await update.message.reply_text(
+        "Schick mir einen Mediathek-Link (oder teile ihn aus der ZDF-App), "
+        "ich lade ihn auf den Pi.\n\n/queue – Warteschlange anzeigen\n"
+        "/list – Videos anzeigen & löschen"
+    )
+
+
+async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    current = state["current"] or "–"
+    await update.message.reply_text(
+        f"Läuft gerade: {current}\nIn der Warteschlange: {download_queue.qsize()}"
+    )
+
+
+VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".m4a", ".mp3"}
+
+
+def list_videos() -> list[Path]:
+    files = [p for p in DOWNLOAD_DIR.glob("*") if p.is_file() and p.suffix in VIDEO_EXTS]
+    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def file_key(path: Path) -> str:
+    # Callback-Daten sind auf 64 Byte begrenzt -> kurzer Hash statt Dateiname
+    return hashlib.sha1(path.name.encode()).hexdigest()[:12]
+
+
+def find_by_key(key: str) -> Path | None:
+    return next((p for p in list_videos() if file_key(p) == key), None)
+
+
+def list_markup() -> tuple[str, InlineKeyboardMarkup | None]:
+    files = list_videos()
+    if not files:
+        return "📂 Keine Videos auf dem Pi.", None
+    total = sum(p.stat().st_size for p in files)
+    buttons = [
+        [InlineKeyboardButton(
+            f"🗑 {p.stem[:45]} ({human_size(p.stat().st_size)})",
+            callback_data=f"del:{file_key(p)}",
+        )]
+        for p in files[:30]
+    ]
+    text = f"📂 {len(files)} Videos · {human_size(total)}\nAntippen zum Löschen:"
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    text, markup = list_markup()
+    await update.message.reply_text(text, reply_markup=markup)
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not is_allowed(update):
+        await query.answer("Nicht erlaubt")
+        return
+    action, _, key = (query.data or "").partition(":")
+
+    if action == "back":
+        await query.answer()
+        text, markup = list_markup()
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+
+    path = find_by_key(key)
+    if path is None:
+        await query.answer("Datei gibt's nicht mehr")
+        text, markup = list_markup()
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+
+    if action == "del":  # Rückfrage
+        await query.answer()
+        await query.edit_message_text(
+            f"Wirklich löschen?\n{path.name}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Ja, löschen", callback_data=f"delok:{key}"),
+                InlineKeyboardButton("↩️ Zurück", callback_data="back:"),
+            ]]),
+        )
+    elif action == "delok":
+        path.unlink(missing_ok=True)
+        log.info("Gelöscht: %s", path.name)
+        await query.answer("Gelöscht 🗑")
+        text, markup = list_markup()
+        await query.edit_message_text(f"🗑 {path.stem} gelöscht.\n\n{text}", reply_markup=markup)
+
+
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        await update.message.reply_text(
+            f"Nicht freigeschaltet. Deine User-ID: {update.effective_user.id}"
+        )
+        return
+    urls = URL_RE.findall(update.message.text or "")
+    if not urls:
+        await update.message.reply_text("Kein Link gefunden 🤔")
+        return
+    for url in urls:
+        await download_queue.put((update.effective_chat.id, url))
+    pos = download_queue.qsize()
+    await update.message.reply_text(
+        f"📥 {len(urls)} Link(s) eingereiht" + (f" (Position {pos})" if pos > 1 else "")
+    )
+
+
+async def post_init(app: Application) -> None:
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    app.create_task(worker(app))
+    log.info("Bot läuft. Ziel: %s, max. %sp", DOWNLOAD_DIR, MAX_HEIGHT)
+
+
+def main() -> None:
+    if not ALLOWED_USERS:
+        log.warning("ALLOWED_USER_IDS ist leer – Bot antwortet nur mit der User-ID.")
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("queue", cmd_queue))
+    app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
