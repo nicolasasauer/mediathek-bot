@@ -103,3 +103,6 @@ Mediatheken ändern gern mal was. Wenn Downloads plötzlich scheitern, hilft mei
 
 ## Hinweis
 Nur für den privaten Gebrauch frei zugänglicher Mediathek-Inhalte.
+
+## Lizenz
+MIT, siehe [LICENSE](LICENSE).
