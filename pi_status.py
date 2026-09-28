@@ -17,6 +17,13 @@ SERVICES = [s.strip() for s in os.environ.get("SERVICES", "").split(",") if s.st
 DOCKER_CONTAINERS = [
     c.strip() for c in os.environ.get("DOCKER_CONTAINERS", "").split(",") if c.strip()
 ]
+# Web-Checks "name=url": erkennt Dienste, die zwar laufen, aber nicht mehr antworten
+HTTP_CHECKS = dict(
+    item.split("=", 1)
+    for item in os.environ.get("HTTP_CHECKS", "").split(",")
+    if "=" in item
+)
+HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "10"))
 DISK_PATHS = [
     p.strip() for p in os.environ.get("DISK_PATHS", "/").split(",") if p.strip()
 ]
@@ -114,8 +121,50 @@ async def service_state(name: str) -> str:
     return await run("systemctl", "is-active", name) or "unbekannt"
 
 
-async def container_state(name: str) -> str:
-    return await run("docker", "inspect", "-f", "{{.State.Status}}", name) or "unbekannt"
+_last_restarts: dict[str, int] = {}
+
+
+async def container_info(name: str, track: bool = True) -> tuple[bool, str, int]:
+    """(ok, beschreibung, neue_neustarts_seit_letzter_prüfung).
+
+    track=False (für /status) verändert den Zähler nicht, damit die Überwachung
+    einen Absturz trotzdem noch meldet.
+    """
+    out = await run(
+        "docker", "inspect", "-f",
+        "{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.RestartCount}}",
+        name,
+    )
+    if not out or out.count("|") != 2:
+        return False, "unbekannt", 0
+    status, health, restarts = out.split("|")
+    try:
+        count = int(restarts)
+    except ValueError:
+        count = 0
+    new = max(0, count - _last_restarts.get(name, count))
+    if track:
+        _last_restarts[name] = count
+    desc = status + (f", {health}" if health else "")
+    ok = status == "running" and health != "unhealthy" and new == 0
+    if new:
+        desc += f", {new}× abgestürzt und neu gestartet"
+    return ok, desc, new
+
+
+async def http_check(url: str) -> tuple[bool, str]:
+    import httpx  # kommt mit python-telegram-bot
+
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, verify=False) as client:
+            r = await client.get(url, follow_redirects=True)
+        if r.status_code < 500:
+            return True, f"antwortet ({r.status_code})"
+        return False, f"Fehler {r.status_code}"
+    except httpx.TimeoutException:
+        return False, f"keine Antwort nach {HTTP_TIMEOUT:.0f} s"
+    except httpx.HTTPError as e:
+        return False, f"nicht erreichbar ({type(e).__name__})"
 
 
 # ---------------------------------------------------------------- Status-Text
@@ -165,14 +214,17 @@ async def status_text(extra_disks: list[str] | None = None) -> str:
     if up is not None:
         lines.append(f"⏱ Läuft seit {fmt_duration(up)}")
 
-    if SERVICES or DOCKER_CONTAINERS:
+    if SERVICES or DOCKER_CONTAINERS or HTTP_CHECKS:
         lines.append("")
         for s in SERVICES:
             st = await service_state(s)
             lines.append(f"{'✅' if st == 'active' else '❌'} {s}: {st}")
         for c in DOCKER_CONTAINERS:
-            st = await container_state(c)
-            lines.append(f"{'✅' if st == 'running' else '❌'} {c} (Docker): {st}")
+            ok, desc, _ = await container_info(c, track=False)
+            lines.append(f"{'✅' if ok else '❌'} {c} (Docker): {desc}")
+        for name, url in HTTP_CHECKS.items():
+            ok, desc = await http_check(url)
+            lines.append(f"{'✅' if ok else '❌'} {name} (Web): {desc}")
 
     return "\n".join(lines)
 
@@ -203,9 +255,14 @@ async def current_problems(extra_disks: list[str] | None = None) -> dict[str, st
             problems[f"svc:{s}"] = f"❌ Dienst {s} ist {st}"
 
     for c in DOCKER_CONTAINERS:
-        st = await container_state(c)
-        if st != "running":
-            problems[f"docker:{c}"] = f"❌ Container {c} ist {st}"
+        ok, desc, _ = await container_info(c)
+        if not ok:
+            problems[f"docker:{c}"] = f"❌ Container {c}: {desc}"
+
+    for name, url in HTTP_CHECKS.items():
+        ok, desc = await http_check(url)
+        if not ok:
+            problems[f"http:{name}"] = f"❌ {name} hängt: {desc}"
 
     return problems
 

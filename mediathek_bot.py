@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+import camera
 import pi_status
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
@@ -196,7 +197,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Schick mir einen Mediathek-Link (oder teile ihn aus der ZDF-App), "
         "ich lade ihn auf den Pi.\n\n/queue – Warteschlange anzeigen\n"
         "/list – Videos anzeigen & löschen\n"
-        "/status – Zustand des Pi"
+        "/status – Zustand des Pi\n"
+        "/foto – aktuelles Kamerabild\n"
+        "/alarm an|aus – Bewegungsalarm schalten"
     )
 
 
@@ -216,6 +219,34 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if state["current"]:
         text += f"\n\n⬇️ Lädt gerade: {state['current']}"
     await update.message.reply_text(text)
+
+
+async def cmd_foto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    if not camera.enabled():
+        await update.message.reply_text("Keine Kamera eingerichtet (SNAPSHOT_URL in .env).")
+        return
+    try:
+        img = await camera.snapshot()
+    except Exception as e:  # noqa: BLE001
+        await update.message.reply_text(f"📷 Kamera nicht erreichbar: {e}")
+        return
+    await update.message.reply_photo(img, caption="📷 Aktuelles Bild")
+
+
+async def cmd_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    arg = (context.args[0].lower() if context.args else "")
+    if arg in ("an", "on", "ein"):
+        camera.set_alarm(True)
+    elif arg in ("aus", "off"):
+        camera.set_alarm(False)
+    state_txt = "🔔 an" if camera.alarm_on() else "🔕 aus"
+    await update.message.reply_text(
+        f"Bewegungsalarm: {state_txt}\n\nUmschalten mit /alarm an oder /alarm aus"
+    )
 
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".m4a", ".mp3"}
@@ -328,6 +359,21 @@ async def post_init(app: Application) -> None:
     app.bot_data["monitor"] = asyncio.create_task(
         pi_status.monitor_loop(notify, extra_disks=[str(DOWNLOAD_DIR)])
     )
+    if camera.enabled():
+        async def on_motion() -> None:
+            try:
+                img = await camera.snapshot()
+            except Exception as e:  # noqa: BLE001
+                await notify(f"🚨 Bewegung erkannt (kein Bild: {e})")
+                return
+            for uid in ALLOWED_USERS:
+                try:
+                    await app.bot.send_photo(uid, img, caption="🚨 Bewegung erkannt")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Foto an %s fehlgeschlagen: %s", uid, e)
+
+        app.bot_data["webhook"] = await camera.start_webhook(on_motion)
+
     note = pi_status.boot_note()
     if note:
         await notify(note)
@@ -336,6 +382,10 @@ async def post_init(app: Application) -> None:
 
 async def post_shutdown(app: Application) -> None:
     """Worker sauber beenden (vermeidet 'Event loop is closed' bei Strg+C)."""
+    server = app.bot_data.get("webhook")
+    if server:
+        server.close()
+        await server.wait_closed()
     for name in ("worker", "monitor"):
         task = app.bot_data.get(name)
         if task:
@@ -354,6 +404,8 @@ def main() -> None:
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("foto", cmd_foto))
+    app.add_handler(CommandHandler("alarm", cmd_alarm))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     app.run_polling()

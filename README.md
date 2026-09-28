@@ -12,6 +12,7 @@ Leitung, und Syncthing überträgt blockweise und setzt nach Abbrüchen fort.
 - Warteschlange für mehrere Links (`/queue`)
 - Videos anzeigen und löschen per Button (`/list`)
 - Pi-Zustand abfragen (`/status`) und automatische Warnungen bei Problemen
+- Kamera: aktuelles Bild (`/foto`) und Bewegungsalarm mit Foto über motionEye (`/alarm an|aus`)
 - Nur freigeschaltete Telegram-User dürfen den Bot nutzen
 - Funktioniert mit allem, was [yt-dlp](https://github.com/yt-dlp/yt-dlp) kann (ZDF, ARD, arte, …)
 
@@ -104,6 +105,8 @@ Alle 5 Minuten prüft der Bot im Hintergrund und schreibt dir von selbst, wenn
 - Unterspannung erkannt wird (schwaches Netzteil)
 - auf einem Laufwerk weniger als `DISK_WARN_PCT` % frei sind (Standard 10 %)
 - ein Dienst aus `SERVICES` oder ein Container aus `DOCKER_CONTAINERS` nicht läuft
+- ein Container abgestürzt und neu gestartet ist oder als `unhealthy` gilt
+- eine Web-Oberfläche aus `HTTP_CHECKS` nicht mehr antwortet (Container läuft, hängt aber)
 
 Jedes Problem wird nur einmal gemeldet, und es kommt eine Entwarnung, wenn es wieder ok ist.
 Nach einem Neustart des Pi (z.B. Stromausfall) meldet sich der Bot ebenfalls.
@@ -115,6 +118,20 @@ docker ps --format '{{.Names}}'
 ```
 Für die Docker-Abfrage muss dein Benutzer in der Gruppe `docker` sein
 (`sudo usermod -aG docker $USER`, danach neu anmelden und den Bot neu starten).
+
+## Kamera & Bewegungsalarm (motionEye)
+1. In motionEye: Kamera-Einstellungen → *Video Streaming* → *Useful URLs* → **Snapshot URL** kopieren
+   und in `.env` bei `SNAPSHOT_URL=` eintragen. Test: `/foto` im Bot.
+2. Schlüssel erzeugen: `openssl rand -hex 16` → bei `WEBHOOK_KEY=` eintragen, Bot neu starten.
+3. In motionEye: *Motion Notifications* → **Call A Web Hook** einschalten
+   - URL: `http://<IP-des-Pi>:8089/motion?key=<dein Schlüssel>`
+   - Methode: GET
+   
+   Die LAN-IP des Pi nehmen (`hostname -I`), nicht `localhost` – motionEye läuft im Container.
+4. Bewegung vor der Kamera → Foto mit „🚨 Bewegung erkannt“ im Chat.
+
+`/alarm aus` schaltet die Alarme stumm (z.B. wenn du zuhause bist), `/alarm an` wieder ein.
+Der Zustand bleibt auch nach einem Neustart erhalten. `MOTION_COOLDOWN` verhindert Alarm-Spam.
 
 ## Update / Wartung
 ```bash
