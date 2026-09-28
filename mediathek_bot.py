@@ -380,6 +380,23 @@ async def post_init(app: Application) -> None:
     log.info("Bot läuft. Ziel: %s, max. %sp", DOWNLOAD_DIR, MAX_HEIGHT)
 
 
+async def post_stop(app: Application) -> None:
+    """Läuft beim Beenden, solange der Bot noch senden kann."""
+    monitor = app.bot_data.get("monitor")
+    if monitor:
+        monitor.cancel()  # keine Fehlalarme, während Dienste herunterfahren
+    kind = await pi_status.shutdown_kind()
+    if kind is None:
+        return  # nur der Bot wird neu gestartet (z.B. nach git pull)
+    pi_status.mark_clean_shutdown(kind)
+    text = "🔄 Pi startet neu …" if kind == "reboot" else "⏻ Pi fährt herunter …"
+    for uid in ALLOWED_USERS:
+        try:
+            await asyncio.wait_for(app.bot.send_message(uid, text), 10)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Abschiedsnachricht fehlgeschlagen: %s", e)
+
+
 async def post_shutdown(app: Application) -> None:
     """Worker sauber beenden (vermeidet 'Event loop is closed' bei Strg+C)."""
     server = app.bot_data.get("webhook")
@@ -399,7 +416,7 @@ async def post_shutdown(app: Application) -> None:
 def main() -> None:
     if not ALLOWED_USERS:
         log.warning("ALLOWED_USER_IDS ist leer – Bot antwortet nur mit der User-ID.")
-    app = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+    app = Application.builder().token(TOKEN).post_init(post_init).post_stop(post_stop).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("list", cmd_list))

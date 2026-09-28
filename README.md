@@ -109,7 +109,12 @@ Alle 5 Minuten prüft der Bot im Hintergrund und schreibt dir von selbst, wenn
 - eine Web-Oberfläche aus `HTTP_CHECKS` nicht mehr antwortet (Container läuft, hängt aber)
 
 Jedes Problem wird nur einmal gemeldet, und es kommt eine Entwarnung, wenn es wieder ok ist.
-Nach einem Neustart des Pi (z.B. Stromausfall) meldet sich der Bot ebenfalls.
+
+**Neustart & Herunterfahren**
+- `sudo reboot` → „🔄 Pi startet neu …“, danach „🟢 Pi ist wieder da“
+- `sudo poweroff` → „⏻ Pi fährt herunter …“
+- Stromausfall oder Absturz → nach dem Hochfahren „⚠️ Pi wurde unerwartet neu gestartet“
+- Ein Neustart nur des Bots (`systemctl restart mediathek-bot`) bleibt still.
 
 Namen der Dienste und Container findest du mit:
 ```bash

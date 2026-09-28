@@ -8,6 +8,7 @@ nicht lesbar ist, wird einfach weggelassen.
 import asyncio
 import os
 import shutil
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------- Konfiguration
@@ -290,12 +291,57 @@ async def monitor_loop(notify, extra_disks: list[str] | None = None) -> None:
         await asyncio.sleep(CHECK_INTERVAL)
 
 
-def boot_note() -> str | None:
-    """Hinweis, falls der Pi gerade erst hochgefahren ist (z.B. nach Stromausfall)."""
-    up = uptime_seconds()
-    if up is not None and up < 600:
-        return f"🔄 Der Pi wurde neu gestartet (läuft seit {fmt_duration(up)})."
+MARKER = Path(
+    os.environ.get("SHUTDOWN_MARKER", "~/.config/mediathek-bot/clean_shutdown")
+).expanduser()
+
+
+async def shutdown_kind() -> str | None:
+    """'reboot', 'poweroff' oder None (nur der Bot wird beendet)."""
+    jobs = await run("systemctl", "list-jobs", "--no-legend") or ""
+    if "reboot.target" in jobs or "kexec.target" in jobs:
+        return "reboot"
+    if "poweroff.target" in jobs or "halt.target" in jobs:
+        return "poweroff"
+    if (await run("systemctl", "is-system-running")) == "stopping":
+        return "poweroff"
     return None
+
+
+def mark_clean_shutdown(kind: str) -> None:
+    try:
+        MARKER.parent.mkdir(parents=True, exist_ok=True)
+        MARKER.write_text(f"{kind} {time.time():.0f}")
+    except OSError:
+        pass
+
+
+def boot_note() -> str | None:
+    """
+    Nach dem Hochfahren: sauberer Neustart oder unerwartet weg gewesen (Stromausfall)?
+    Der Marker wird beim geordneten Herunterfahren geschrieben und hier wieder gelöscht.
+    """
+    up = uptime_seconds()
+    try:
+        marker = MARKER.read_text().split()
+        MARKER.unlink()
+    except (OSError, IndexError):
+        marker = []
+    if up is None or up >= 600:
+        return None  # Pi läuft schon länger, nur der Bot wurde neu gestartet
+    if marker:
+        down_for = ""
+        try:
+            gone = time.time() - float(marker[1]) - up
+            if gone > 0:
+                down_for = f", war {fmt_duration(gone)} aus"
+        except (IndexError, ValueError):
+            pass
+        return f"🟢 Pi ist wieder da (läuft seit {fmt_duration(up)}{down_for})."
+    return (
+        f"⚠️ Pi wurde unerwartet neu gestartet (läuft seit {fmt_duration(up)}).\n"
+        "Kein geordnetes Herunterfahren – evtl. Stromausfall oder Absturz."
+    )
 
 
 if __name__ == "__main__":  # schneller Test: python pi_status.py
