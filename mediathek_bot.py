@@ -13,6 +13,8 @@ import hashlib
 import logging
 import os
 import re
+import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -38,6 +40,10 @@ TEMP_DIR = Path(os.environ.get("TEMP_DIR", "~/.cache/mediathek-bot")).expanduser
 MAX_HEIGHT = int(os.environ.get("MAX_HEIGHT", "720"))  # 720p spart Platz am Handy
 SUBTITLES = os.environ.get("SUBTITLES", "0") == "1"
 PROGRESS_INTERVAL = 8  # Sekunden zwischen Fortschritts-Updates
+
+# yt-dlp bevorzugt aus dem gleichen venv wie dieses Python nehmen
+_venv_ytdlp = Path(sys.executable).parent / "yt-dlp"
+YTDLP = str(_venv_ytdlp) if _venv_ytdlp.exists() else (shutil.which("yt-dlp") or "yt-dlp")
 
 URL_RE = re.compile(r"https?://\S+")
 
@@ -68,7 +74,7 @@ def human_size(num_bytes: int) -> str:
 def build_command(url: str) -> list[str]:
     fmt = f"bv*[height<={MAX_HEIGHT}]+ba/b[height<={MAX_HEIGHT}]/b"
     cmd = [
-        "yt-dlp",
+        YTDLP,
         "-f", fmt,
         "--merge-output-format", "mp4",
         "-P", f"home:{DOWNLOAD_DIR}",
