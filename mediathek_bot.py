@@ -288,14 +288,25 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def post_init(app: Application) -> None:
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    app.create_task(worker(app))
+    app.bot_data["worker"] = asyncio.create_task(worker(app))
     log.info("Bot läuft. Ziel: %s, max. %sp", DOWNLOAD_DIR, MAX_HEIGHT)
+
+
+async def post_shutdown(app: Application) -> None:
+    """Worker sauber beenden (vermeidet 'Event loop is closed' bei Strg+C)."""
+    task = app.bot_data.get("worker")
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def main() -> None:
     if not ALLOWED_USERS:
         log.warning("ALLOWED_USER_IDS ist leer – Bot antwortet nur mit der User-ID.")
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("list", cmd_list))
