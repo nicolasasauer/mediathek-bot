@@ -8,6 +8,7 @@ Leitung, und Syncthing überträgt blockweise und setzt nach Abbrüchen fort.
 
 **Funktionen**
 - Link teilen (z.B. aus der ZDF-App) → Download mit Fortschritt im Chat
+- Kurze Nachricht bei 25 / 50 / 75 % und wenn fertig (mit Benachrichtigung)
 - Warteschlange für mehrere Links (`/queue`)
 - Videos anzeigen und löschen per Button (`/list`)
 - Nur freigeschaltete Telegram-User dürfen den Bot nutzen

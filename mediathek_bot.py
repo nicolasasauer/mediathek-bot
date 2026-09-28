@@ -40,6 +40,11 @@ TEMP_DIR = Path(os.environ.get("TEMP_DIR", "~/.cache/mediathek-bot")).expanduser
 MAX_HEIGHT = int(os.environ.get("MAX_HEIGHT", "720"))  # 720p spart Platz am Handy
 SUBTITLES = os.environ.get("SUBTITLES", "0") == "1"
 PROGRESS_INTERVAL = 8  # Sekunden zwischen Fortschritts-Updates
+# Bei diesen Prozentwerten kommt eine eigene Nachricht (mit Benachrichtigung)
+MILESTONES = [
+    int(x) for x in os.environ.get("MILESTONES", "25,50,75").split(",") if x.strip()
+]
+PCT_RE = re.compile(r"([\d.]+)%")
 
 # yt-dlp bevorzugt aus dem gleichen venv wie dieses Python nehmen
 _venv_ytdlp = Path(sys.executable).parent / "yt-dlp"
@@ -110,6 +115,7 @@ async def run_download(bot, chat_id: int, url: str) -> None:
     status = await bot.send_message(chat_id, f"⏳ Starte Download…\n{url}")
     title, filepath = url, None
     last_update = 0.0
+    reached: set[int] = set()  # Meilensteine nur einmal melden (yt-dlp lädt Video + Audio getrennt)
     tail: list[str] = []
 
     proc = await asyncio.create_subprocess_exec(
@@ -131,6 +137,13 @@ async def run_download(bot, chat_id: int, url: str) -> None:
         elif line.startswith("FILE "):
             filepath = line[5:]
         elif line.startswith("PROG "):
+            m = PCT_RE.search(line)
+            if m:
+                pct_val = float(m.group(1))
+                new = [ms for ms in MILESTONES if pct_val >= ms and ms not in reached]
+                if new:
+                    reached.update(new)
+                    await bot.send_message(chat_id, f"⏳ {max(new)} % · {title}")
             now = time.monotonic()
             if now - last_update >= PROGRESS_INTERVAL:
                 last_update = now
@@ -145,10 +158,14 @@ async def run_download(bot, chat_id: int, url: str) -> None:
 
     if rc == 0 and filepath and Path(filepath).exists():
         size = human_size(Path(filepath).stat().st_size)
-        await safe_edit(status, f"✅ Fertig: {title}\n{size} · wird jetzt aufs Handy synchronisiert")
+        await safe_edit(status, f"⬇️ {title}\n100 %")
+        await bot.send_message(
+            chat_id, f"✅ Fertig: {title}\n{size} · wird jetzt aufs Handy synchronisiert"
+        )
     else:
         err = "\n".join(tail) or "unbekannter Fehler"
-        await safe_edit(status, f"❌ Fehlgeschlagen: {title}\n\n{err[-800:]}")
+        await safe_edit(status, f"⬇️ {title}\nabgebrochen")
+        await bot.send_message(chat_id, f"❌ Fehlgeschlagen: {title}\n\n{err[-800:]}")
 
 
 async def worker(app: Application) -> None:
