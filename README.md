@@ -11,6 +11,7 @@ Leitung, und Syncthing überträgt blockweise und setzt nach Abbrüchen fort.
 - Kurze Nachricht bei 25 / 50 / 75 % und wenn fertig (mit Benachrichtigung)
 - Warteschlange für mehrere Links (`/queue`)
 - Videos anzeigen und löschen per Button (`/list`)
+- Pi-Zustand abfragen (`/status`) und automatische Warnungen bei Problemen
 - Nur freigeschaltete Telegram-User dürfen den Bot nutzen
 - Funktioniert mit allem, was [yt-dlp](https://github.com/yt-dlp/yt-dlp) kann (ZDF, ARD, arte, …)
 
@@ -93,6 +94,27 @@ Dazu die Tailscale-App aufs Handy, mit demselben Account.
 - `/queue` zeigt, was gerade läuft
 - `/list` zeigt alle Videos mit Größe; antippen → bestätigen → gelöscht (Syncthing löscht es dann auch am Handy)
 - Gesehene Folgen am Handy löschen → verschwinden per Sync auch auf dem Pi
+
+## Pi-Überwachung
+`/status` zeigt CPU-Temperatur, Stromversorgung, Last, RAM, freien Speicher, Uptime
+und den Zustand der Dienste und Container aus der `.env`.
+
+Alle 5 Minuten prüft der Bot im Hintergrund und schreibt dir von selbst, wenn
+- die CPU zu heiß wird (`TEMP_WARN`, Standard 75 °C)
+- Unterspannung erkannt wird (schwaches Netzteil)
+- auf einem Laufwerk weniger als `DISK_WARN_PCT` % frei sind (Standard 10 %)
+- ein Dienst aus `SERVICES` oder ein Container aus `DOCKER_CONTAINERS` nicht läuft
+
+Jedes Problem wird nur einmal gemeldet, und es kommt eine Entwarnung, wenn es wieder ok ist.
+Nach einem Neustart des Pi (z.B. Stromausfall) meldet sich der Bot ebenfalls.
+
+Namen der Dienste und Container findest du mit:
+```bash
+systemctl list-units --type=service --state=running
+docker ps --format '{{.Names}}'
+```
+Für die Docker-Abfrage muss dein Benutzer in der Gruppe `docker` sein
+(`sudo usermod -aG docker $USER`, danach neu anmelden und den Bot neu starten).
 
 ## Update / Wartung
 ```bash

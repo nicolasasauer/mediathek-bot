@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+import pi_status
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -194,7 +195,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Schick mir einen Mediathek-Link (oder teile ihn aus der ZDF-App), "
         "ich lade ihn auf den Pi.\n\n/queue – Warteschlange anzeigen\n"
-        "/list – Videos anzeigen & löschen"
+        "/list – Videos anzeigen & löschen\n"
+        "/status – Zustand des Pi"
     )
 
 
@@ -205,6 +207,15 @@ async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Läuft gerade: {current}\nIn der Warteschlange: {download_queue.qsize()}"
     )
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    text = await pi_status.status_text(extra_disks=[str(DOWNLOAD_DIR)])
+    if state["current"]:
+        text += f"\n\n⬇️ Lädt gerade: {state['current']}"
+    await update.message.reply_text(text)
 
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".m4a", ".mp3"}
@@ -306,18 +317,33 @@ async def post_init(app: Application) -> None:
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     app.bot_data["worker"] = asyncio.create_task(worker(app))
+
+    async def notify(text: str) -> None:
+        for uid in ALLOWED_USERS:  # private Chat-ID == User-ID
+            try:
+                await app.bot.send_message(uid, text)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Benachrichtigung an %s fehlgeschlagen: %s", uid, e)
+
+    app.bot_data["monitor"] = asyncio.create_task(
+        pi_status.monitor_loop(notify, extra_disks=[str(DOWNLOAD_DIR)])
+    )
+    note = pi_status.boot_note()
+    if note:
+        await notify(note)
     log.info("Bot läuft. Ziel: %s, max. %sp", DOWNLOAD_DIR, MAX_HEIGHT)
 
 
 async def post_shutdown(app: Application) -> None:
     """Worker sauber beenden (vermeidet 'Event loop is closed' bei Strg+C)."""
-    task = app.bot_data.get("worker")
-    if task:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    for name in ("worker", "monitor"):
+        task = app.bot_data.get(name)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 def main() -> None:
@@ -327,6 +353,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     app.run_polling()
