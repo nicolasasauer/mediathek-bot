@@ -379,6 +379,14 @@ async def post_init(app: Application) -> None:
 
         app.bot_data["webhook"] = await camera.start_webhook(on_motion)
 
+    if not shutil.which("ffmpeg"):
+        log.warning("ffmpeg fehlt!")
+        await notify(
+            "⚠️ ffmpeg ist nicht installiert – Videos werden evtl. nicht richtig "
+            "zusammengesetzt (kein Ton im Samsung-Player o.ä.).\n"
+            "Installieren mit: sudo apt install -y ffmpeg"
+        )
+
     note = pi_status.boot_note()
     if note:
         await notify(note)
