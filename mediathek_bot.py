@@ -79,7 +79,12 @@ def human_size(num_bytes: int) -> str:
 
 
 def build_command(url: str) -> list[str]:
-    fmt = f"bv*[height<={MAX_HEIGHT}]+ba/b[height<={MAX_HEIGHT}]/b"
+    h = MAX_HEIGHT
+    # AAC-Ton bevorzugen (läuft auf jedem Player, z.B. Samsung), sonst beliebige Tonspur
+    fmt = (
+        f"bv*[height<={h}]+ba[acodec^=mp4a]/b[height<={h}][acodec^=mp4a]"
+        f"/bv*[height<={h}]+ba/b[height<={h}]/b"
+    )
     cmd = [
         YTDLP,
         "-f", fmt,
